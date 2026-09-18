@@ -1,8 +1,59 @@
 {
-  "mae_minutes": 3.177,
-  "rmse_minutes": 3.989,
-  "r2": 0.598,
-  "train_time_seconds": 2.97,
-  "n_train": 6191,
-  "n_test": 1548
+  "model": "rf",
+  "target": "retard_moyen_tous_trains_arrivee",
+  "test": {
+    "from": "2025-07",
+    "to": "2026-06",
+    "n_rows": 1446,
+    "mae_minutes": 2.712,
+    "rmse_minutes": 3.702,
+    "r2": 0.406,
+    "bias_minutes": -1.518
+  },
+  "train": {
+    "from": "2018-02",
+    "to": "2025-06",
+    "n_rows": 10760,
+    "fit_seconds": 25.1
+  },
+  "baselines": {
+    "train_mean": {
+      "mae_minutes": 3.874,
+      "rmse_minutes": 5.49,
+      "r2": -0.306,
+      "bias_minutes": -2.657
+    },
+    "last_month": {
+      "mae_minutes": 3.165,
+      "rmse_minutes": 4.27,
+      "r2": 0.21,
+      "bias_minutes": -0.417
+    },
+    "mean_6_months": {
+      "mae_minutes": 2.8,
+      "rmse_minutes": 3.819,
+      "r2": 0.368,
+      "bias_minutes": -0.954
+    },
+    "mean_12_months": {
+      "mae_minutes": 2.798,
+      "rmse_minutes": 3.815,
+      "r2": 0.369,
+      "bias_minutes": -1.476
+    }
+  },
+  "skill_vs_best_baseline": {
+    "baseline": "mean_12_months",
+    "mae_reduction": 0.031
+  },
+  "cv_mean_mae": {
+    "rf": 1.945,
+    "hgb": 1.997,
+    "baseline:mean_12_months": 2.061,
+    "baseline:mean_6_months": 2.083,
+    "baseline:train_mean": 2.594,
+    "baseline:last_month": 2.605
+  },
+  "n_features": 35,
+  "n_od_pairs": 130
 }

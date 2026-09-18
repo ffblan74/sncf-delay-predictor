@@ -1,86 +1,145 @@
 """
-Generates a synthetic dataset that mimics the structure of SNCF's public
-"regularité mensuelle TGV/TER" open data (https://data.sncf.com).
+Synthetic stand-in for the real SNCF export, used by the tests and by CI.
 
-Why synthetic data? This project is designed to run out-of-the-box for a
-portfolio/demo without requiring API access. To use REAL data instead:
-  1. Download a CSV from https://data.sncf.com (e.g. "regularite-mensuelle-ter")
-  2. Rename columns to match RAW_COLUMNS below (or adapt data_pipeline.py)
-  3. Skip this script and point train.py at your CSV
+The real dataset is public but not redistributed in this repository (see
+`fetch_data.py`), and it is too large to commit as a fixture. This generator
+produces a monthly OD panel with the *same schema, separator and quirks* as
+the real export, so the pipeline, the training script and the API can be
+exercised end to end without any download:
 
-The synthetic generator injects realistic relationships (rush hour, season,
-route length, weather) so the model has real signal to learn from -- it is
-not pure noise.
+* the same French column names and `;` separator;
+* OD pairs with a persistent delay level, a seasonal component and a
+  network-wide drift -- i.e. the structure the lag features exploit;
+* the same data-quality traps: months with zero traffic, a handful of
+  corrupt negative averages, and a free-text comment column containing
+  embedded newlines and semicolons.
+
+It is *not* a substitute for the real data when reporting metrics: the
+numbers in the README come from the real export.
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-RAW_COLUMNS = [
-    "date", "route", "departure_station", "arrival_station",
-    "distance_km", "scheduled_hour", "is_weekend", "season",
-    "weather_severity", "planned_trains", "delay_minutes", "cancelled",
+COLUMNS = [
+    "date", "service", "gare_depart", "gare_arrivee", "duree_moyenne",
+    "nb_train_prevu", "nb_annulation", "commentaire_annulation",
+    "nb_train_depart_retard", "retard_moyen_depart",
+    "retard_moyen_tous_trains_depart", "commentaire_retards_depart",
+    "nb_train_retard_arrivee", "retard_moyen_arrivee",
+    "retard_moyen_tous_trains_arrivee", "commentaires_retard_arrivee",
+    "nb_train_retard_sup_15", "retard_moyen_trains_retard_sup15",
+    "nb_train_retard_sup_30", "nb_train_retard_sup_60",
+    "prct_cause_externe", "prct_cause_infra", "prct_cause_gestion_trafic",
+    "prct_cause_materiel_roulant", "prct_cause_gestion_gare",
+    "prct_cause_prise_en_charge_voyageurs",
 ]
 
 ROUTES = [
-    ("Paris", "Lyon", 465), ("Paris", "Marseille", 775),
-    ("Paris", "Lille", 225), ("Paris", "Bordeaux", 585),
-    ("Paris", "Strasbourg", 490), ("Lyon", "Marseille", 315),
-    ("Paris", "Nantes", 385), ("Paris", "Rennes", 350),
+    ("PARIS MONTPARNASSE", "BORDEAUX ST JEAN", 141),
+    ("PARIS LYON", "MARSEILLE ST CHARLES", 195),
+    ("PARIS NORD", "LILLE", 63),
+    ("PARIS EST", "STRASBOURG", 110),
+    ("LYON PART DIEU", "MARSEILLE ST CHARLES", 105),
+    ("PARIS MONTPARNASSE", "NANTES", 124),
+    ("PARIS MONTPARNASSE", "RENNES", 88),
+    ("PARIS LYON", "GENEVE", 189),
 ]
 
-SEASONS = ["winter", "spring", "summer", "autumn"]
+_INCIDENT_COMMENT = (
+    'Ce mois-ci, l\'OD a ete touchee par les incidents suivants :\n'
+    "Le 3 : Derangement d'une aiguille (35 TGV ; 407mn);\n"
+    "Le 12 : Incident catenaire (26 TGV ; 2188mn)"
+)
 
 
-def _season_from_month(month: int) -> str:
-    return SEASONS[(month % 12) // 3]
-
-
-def generate(n_rows: int = 8000, seed: int = 42) -> pd.DataFrame:
+def generate(n_months: int = 96, seed: int = 42, start: str = "2018-01") -> pd.DataFrame:
+    """Build a synthetic monthly panel over `n_months` for every route."""
     rng = np.random.default_rng(seed)
+    months = pd.period_range(start, periods=n_months, freq="M")
+
+    # per-route persistent delay level, and a slow network-wide drift
+    levels = {route: rng.uniform(3.0, 9.0) for route in ROUTES}
+    drift = np.cumsum(rng.normal(0.02, 0.15, n_months))
+
     rows = []
+    for route in ROUTES:
+        dep, arr, duration = route
+        service = "International" if arr in {"GENEVE"} else "National"
+        level = levels[route]
+        previous = level
+        for i, month in enumerate(months):
+            # seasonality: worse in summer holidays and in December
+            seasonal = 1.6 if month.month in (7, 8, 12) else 0.0
+            # autocorrelated: this month resembles the last one
+            delay = max(
+                0.2,
+                0.55 * previous + 0.45 * level + seasonal + drift[i]
+                + rng.normal(0, 1.2),
+            )
+            previous = delay
 
-    dates = pd.date_range("2022-01-01", "2025-12-31", freq="D")
+            planned = int(np.clip(rng.normal(250, 60), 40, 500))
+            cancelled = int(rng.poisson(planned * 0.01))
+            late_arrival = int(np.clip(rng.normal(planned * 0.22, 30), 0, planned))
+            late_15 = int(late_arrival * rng.uniform(0.3, 0.6))
+            late_30 = int(late_15 * rng.uniform(0.2, 0.5))
+            late_60 = int(late_30 * rng.uniform(0.1, 0.4))
+            causes = rng.dirichlet(np.ones(6)) * 100
 
-    for _ in range(n_rows):
-        date = rng.choice(dates)
-        date = pd.Timestamp(date)
-        dep, arr, dist = ROUTES[rng.integers(0, len(ROUTES))]
-        hour = int(rng.integers(5, 23))
-        is_weekend = date.dayofweek >= 5
-        season = _season_from_month(date.month)
-        # winter/autumn -> more weather disruption
-        base_weather = {"winter": 0.6, "autumn": 0.4, "spring": 0.2, "summer": 0.1}[season]
-        weather_severity = float(np.clip(rng.normal(base_weather, 0.2), 0, 1))
-        planned_trains = int(rng.integers(4, 40))
+            comment = _INCIDENT_COMMENT if rng.random() < 0.05 else ""
+            rows.append([
+                str(month), service, dep, arr, duration, planned, cancelled, "",
+                int(late_arrival * 1.3), round(delay * 1.8, 6),
+                round(delay * 0.7, 6), "",
+                late_arrival, round(delay * 4, 6), round(delay, 6), comment,
+                late_15, round(delay * 4, 6), late_30, late_60,
+                *[round(c, 6) for c in causes],
+            ])
 
-        # --- signal the model should learn ---
-        delay = 0.0
-        delay += dist / 100 * 0.6                       # longer routes -> more delay
-        delay += weather_severity * 18                   # weather impact
-        if hour in (7, 8, 9, 17, 18, 19):                 # rush hour
-            delay += 4.5
-        if is_weekend:
-            delay -= 2.0                                  # less congestion
-        delay += rng.normal(0, 4)                          # noise
-        delay = max(0.0, delay)
+    df = pd.DataFrame(rows, columns=COLUMNS)
+    return _inject_quality_issues(df, rng)
 
-        cancel_prob = 0.01 + weather_severity * 0.07
-        cancelled = int(rng.random() < cancel_prob)
-        if cancelled:
-            delay = 0.0  # cancelled trains aren't "delayed"
 
-        rows.append([
-            date.date().isoformat(), f"{dep}-{arr}", dep, arr, dist, hour,
-            int(is_weekend), season, round(weather_severity, 2),
-            planned_trains, round(delay, 1), cancelled,
-        ])
+def _inject_quality_issues(df: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    """Reproduce the defects the cleaning step has to survive."""
+    target = "retard_moyen_tous_trains_arrivee"
 
-    return pd.DataFrame(rows, columns=RAW_COLUMNS)
+    # a month with no service at all (April 2020 in the real data)
+    months = df["date"].unique()
+    blackout = df["date"] == months[min(27, len(months) - 1)]
+    df.loc[blackout, ["nb_train_prevu", "duree_moyenne", "nb_annulation"]] = 0
+    df.loc[blackout, target] = 0.0
+
+    # corrupt aggregates, as found around the December 2019 strike
+    corrupt = rng.choice(df.index, size=max(2, len(df) // 400), replace=False)
+    df.loc[corrupt, target] = -rng.uniform(50, 400, len(corrupt))
+
+    # a couple of ODs served by too few trains to average meaningfully
+    tiny = rng.choice(df.index, size=max(2, len(df) // 500), replace=False)
+    df.loc[tiny, "nb_train_prevu"] = rng.integers(1, 8, len(tiny))
+    df.loc[tiny, target] = rng.uniform(40, 90, len(tiny))
+    return df
+
+
+def write(path: str = "data/raw_regularity.csv", **kwargs) -> pd.DataFrame:
+    df = generate(**kwargs)
+    df.to_csv(path, sep=";", index=False)
+    return df
 
 
 if __name__ == "__main__":
-    df = generate()
-    df.to_csv("data/raw_regularity.csv", index=False)
-    print(f"Wrote {len(df)} rows to data/raw_regularity.csv")
-    print(df.head())
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", default="data/raw_regularity.csv")
+    parser.add_argument("--months", type=int, default=96)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    df = write(args.out, n_months=args.months, seed=args.seed)
+    print(f"Wrote {len(df)} rows ({df['date'].nunique()} months, "
+          f"{len(ROUTES)} routes) to {args.out}")
+    print(df.head(3).to_string())
