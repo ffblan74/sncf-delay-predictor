@@ -1,0 +1,8 @@
+{
+  "mae_minutes": 3.177,
+  "rmse_minutes": 3.989,
+  "r2": 0.598,
+  "train_time_seconds": 2.97,
+  "n_train": 6191,
+  "n_test": 1548
+}
